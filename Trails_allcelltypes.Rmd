@@ -1,0 +1,861 @@
+---
+title: "Trails: Normalisation results in the control subset"
+output: html_document
+---
+
+
+```{r setup, message = FALSE, warning = FALSE, results='hide'}
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, results='hide')
+
+library(Seurat)
+library(tidyverse)
+library(edgeR)
+library(scater)
+library(ruv)
+library(cluster) #silhouettes
+library(factoextra) #silhouettes
+
+source("/mnt/auxf.R")
+path <- ('/domino/datasets/local/RUV')
+
+```
+
+
+## Preprocessing
+
+### Pseudobulk matrices
+
+```{r pbc}
+
+PBC <- readRDS("/domino/datasets/local/RUV/pblupusds2.rds")
+PBC_split <- split(PBC$samples$sample_cell,PBC$samples$ind_cov_batch_cov)
+PBC_S <- DGEList(counts=sapply(PBC_split, function(x) rowSums(PBC$counts[,x])),
+                 samples=unique(PBC$samples[,!colnames(PBC$samples) %in% c("cg_cov" ,"sample_cell","lib.size","norm.factors" )]))  
+
+```
+
+### Negative control genes and high variable genes
+
+```{r NCG}
+
+hkGagnon <- read.csv(paste0(path,"/Genes_Gagnon.txt"), sep="")
+hkGagnon <- unlist(hkGagnon)
+filter.vst <- FindVariableFeatures(PBC,selection.method = 'vst')
+high_varg <- which(filter.vst[hkGagnon,]$vst.variance.standardized>1.8)
+
+gene.D <- data.frame(gene=rownames(PBC))
+rownames(gene.D) <- gene.D$gene
+hk.ind <- rownames(PBC) %in% hkGagnon[-high_varg]
+
+```
+
+### Assigning mock treatment
+
+```{r mock treatment}
+
+
+subs <- unique(PBC$samples$ind_cov)
+set.seed(1)
+treatment <- sample(c("A","B"),length(subs), replace=T)
+
+PBC$samples <- PBC$samples %>% left_join(bind_cols(ind_cov = subs, fk.tr = treatment), by='ind_cov')
+PBC_S$samples <- PBC_S$samples %>% left_join(bind_cols(ind_cov = subs, fk.tr = treatment), by='ind_cov')
+
+```
+
+## Dataset 
+
+```{r dataset, echo=FALSE}
+celltypes <- levels(PBC$samples$cg_cov)[-3]
+
+group_by(PBC$samples,Processing_Cohort,ind_cov,pop_cov,Age,fk.tr) %>%
+  summarise(count=n()) %>% ungroup()%>% 
+  mutate(ind_cov=str_extract(as.character(ind_cov),"[^_]+$")) %>%
+  ggplot(aes(y=ind_cov,x=Processing_Cohort, group=ind_cov, color=fk.tr)) +
+  geom_point(size=2) + geom_line() + scale_colour_brewer(palette='Set1') +
+  labs(y = "Subject", x= "Processing cohort", color = "Mock treatment")+ theme_minimal()+
+  ggtitle('Assays')
+
+```
+
+
+```{r metrics, echo=FALSE}
+
+split.ct <- function(PBC,ct){
+  
+  y.ct <- PBC[rowSums(PBC$counts >= 10) >= 5, PBC$samples$cg_cov==ct, keep.lib.sizes=FALSE]
+  pmin <- find_p(y.ct)
+  y.ct <- calcNormFactors(y.ct, method="upperquartile", p=pmin)
+  
+  return(y.ct)
+}
+
+highvarg <- function(y){
+  
+  filter.vst <- FindVariableFeatures(y,selection.method = 'vst')
+  top_high_varg <- rownames(arrange(filter.vst,-vst.variance.standardized))[1:500]
+  
+  return(top_high_varg)
+}
+
+PCAplot <- function (pca,y,avg_sw2=F,avg_swp=F){
+  
+  if(isTRUE(avg_sw2|avg_swp)){
+   labelgg <- paste0(c('2 PCs: ','10 PCs: '), c(avg_sw2,avg_swp)) 
+  }else{
+   labelgg <- ""
+  }
+  
+  if(is.null(rownames(pca))){
+    rownames(pca)<- y$samples$sample_cell
+  }
+  
+  pos_x <- min(pca[,1])
+  pos_y <- min(pca[,2]) 
+  ppca <- data.frame(pca) %>%
+  tibble::rownames_to_column("sample_cell") %>% # Add the metadata into this data frame; match by sample IDs
+  dplyr::inner_join(y$samples, by = "sample_cell") %>% mutate(control= ind_cov=='ICC_control') %>%
+  ggplot(aes(x = PC1,y = PC2,color= Processing_Cohort)) + geom_point(aes(shape=pop_cov),size=3) + 
+    geom_text(aes(label = ifelse(control, 'control', "")),color='black',vjust = 0, nudge_y = 0.5) + ggtitle("Logcpm plot") +
+    labs(color = "Processing cohort", shape = "Ethnicity") + 
+    theme_minimal()+ theme(legend.position = "bottom") + scale_color_brewer(palette='Set1')+
+    annotate("text", x = c(pos_x+3,pos_x+3), y = c(pos_y+3, pos_y), label = labelgg, size=3, fontface="bold")
+    
+  return(ppca)
+  
+}
+
+Silplot <- function (sil){
+  
+  fviz_silhouette(sil)+ scale_fill_brewer(palette = 'Set1') + 
+    scale_color_brewer(palette = 'Set1') + theme_minimal() +
+    theme(axis.text.x=element_blank(),legend.position = "bottom") +
+    labs(fill="Processing Cohort",color="Processing Cohort")
+}
+
+RLEplot <-function(names, logy, samples){
+   
+  median <- apply(logy, 1, median)
+  samples <- as.data.frame(samples)
+  
+  rle <- apply(logy, 2, function(x) x - median)
+  dataplot <- as.data.frame(rle) %>% 
+    pivot_longer(everything(),names_to = 'sample_cell') %>% 
+    left_join(samples, by='sample_cell')
+  
+  dataplot$sample_cell <- fct_relevel(dataplot$sample_cell,names)
+  
+  ggplot(dataplot,aes(x=sample_cell, y=value,colour = Processing_Cohort, linetype=pop_cov )) +
+    geom_boxplot(outlier.shape = NA) + ylim(-2,2) + scale_color_brewer(palette='Set1') + ggtitle("RLE plot") +
+     geom_hline(yintercept=0, linetype='dashed') + labs(y="Relative log expression", color='Processing cohort')+
+    theme_minimal()+ theme( legend.position = 'bottom',strip.text =element_blank(),
+                            axis.title.x = element_blank(),
+                            axis.text.x = element_blank(),
+                            axis.ticks.x = element_blank())
+
+}
+
+histpvals <- function(y){
+  
+  design <- model.matrix(~ y$samples$fk.tr ) 
+  colnames(design) <- c('Intercept','Managed')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalsUQ <- topTable(efit, coef=2, number=dim(y)[1], adjust="BH")
+  
+  ggplot(pvalsUQ, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+  
+}
+```
+
+
+## Unwanted variation in the data {.tabset}
+
+
+```{r raw data, results='hide'}
+
+ys.ct <- lapply(celltypes,split.ct,PBC=PBC) # split dataset
+logys.ct <- lapply(ys.ct,function(y) voom(y)$E) #cpm transformation
+hvgs <- lapply(logys.ct, highvarg) # high variable genes for PCA
+
+```
+
+```{r raw data metrics, results='hide', echo=FALSE}
+  
+pcas <- mapply(calculatePCA,x=logys.ct, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+  
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+Silplots <- lapply(silps,Silplot)
+
+PCAplots <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplots <- mapply(RLEplot, names= ordnames, logy=logys.ct,samples=map(ys.ct, "samples"), SIMPLIFY = F)
+
+Hists <- lapply(ys.ct,histpvals)
+
+```
+
+
+```{r rawplots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplots[[i]], Silplots[[i]], RLEplots[[i]], Hists[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+## Removing the Processing Cohort effect {.tabset}
+
+```{r pc, results = 'hide',echo=FALSE}
+
+normpc <- function(y){
+  
+  design <- model.matrix(~ y$samples$fk.tr +
+                           y$samples$Processing_Cohort +
+                           y$samples$pop_cov) 
+  
+  colnames(design) <- c('(Intercept)','tr',paste0('Proc', 2:4),'pop')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  alpha <- vfit$coefficients[,paste0('Proc', 2:4)] # same coefficients as efit and returned by toptable
+  newY <- v$E - t(design[,paste0('Proc', 2:4)]%*%t(alpha))
+  return(newY)
+}
+
+histpc <- function(y){
+  logy <- edgeR::cpm(y,log=T)
+  design <- model.matrix(~ y$samples$fk.tr + y$samples$Processing_Cohort ) 
+  colnames(design) <- c('(Intercept)','tr',paste0('Proc', 2:4))
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalspc <- topTable(efit, coef=2, number=dim(y)[1], adjust="BH")
+  
+  ggplot(pvalspc, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+ 
+}
+
+normpcs.ct <- lapply(ys.ct,normpc)
+hvgs <- lapply(normpcs.ct, highvarg)
+pcas <- mapply(calculatePCA,x=normpcs.ct, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+  
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+Silplots <- lapply(silps,Silplot)
+
+PCAplots <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplots <- mapply(RLEplot, names= ordnames, logy=normpcs.ct, samples=map(ys.ct, "samples"), SIMPLIFY = F)
+
+Hists <- lapply(ys.ct,histpc)
+
+
+
+  
+```
+
+```{r PCplots , results='asis',echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplots[[i]], Silplots[[i]], RLEplots[[i]], Hists[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+## T1 {.tabset}
+
+```{r T1 functions, echo=FALSE}
+
+histT <- function (y,w,samples){
+  k <- ncol(w)
+  design <- model.matrix(~ samples$fk.tr + w + samples$pop_cov) 
+  colnames(design) <- c('Intercept','fk.tr', paste0("W",1:k), 'pop')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalsT <- topTable(efit, coef=2, number=dim(y)[1], adjust="BH")
+  
+  ggplot(pvalsT, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+}
+
+```
+
+
+```{r T1}
+
+k=5
+
+y.all <- PBC[1:nrow(PBC),,keep.lib.sizes=FALSE]
+pmin.all <- find_p(y.all)
+y.all <- calcNormFactors(y.all, method="upperquartile", p=pmin.all)
+nf.all <- y.all$samples$norm.factors
+logy.all <- voom(y.all)$E
+
+y.all$samples$ind_covT1 <- factor(paste(y.all$samples$ind_cov, y.all$samples$cg_cov,sep="_"))
+
+M <- replicate.matrix(y.all$samples$ind_covT1)
+rownames(M) <- y.all$samples$ind_covT1
+
+group <- factor(paste(y.all$samples$fk.tr, y.all$samples$cg_cov,sep="."))
+
+ruv2T1 <- RUV2mod(Y = t(logy.all), X = group, ctl = hk.ind, k=k, include.intercept = F, Z = y.all$samples$pop_cov)
+ruv3T1 <- RUVIIIW(Y = t(logy.all), M = M, ctl = hk.ind,  k = k, return.info = T)
+ruv4T1 <- RUV4mod(Y = t(logy.all), X = group, ctl = hk.ind, k=k, Z = y.all$samples$pop_cov)
+```
+
+
+### RUV2 {.tabset}
+
+```{r T1 RUV2, results='hide', echo=FALSE}
+
+normT1 <- split(ruv2T1$newY,y.all$samples$cg_cov)
+
+normT1 <- mapply(function(x,y) {
+  mat=t(matrix(x, ncol = ncol(ruv2T1$newY)))
+  colnames(mat)=y$samples$sample_cell
+  rownames(mat)=colnames(ruv2T1$newY)
+  mat
+  },x=normT1,y=ys.ct, SIMPLIFY = F )
+
+
+hvgs <- lapply(normT1, highvarg)
+pcas <- mapply(calculatePCA,x=normT1, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(split(y.all$samples$Processing_Cohort,y.all$samples$cg_cov),as.integer) 
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT12 <- lapply(silps,Silplot)
+
+PCAplotsT12 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT12 <- mapply(RLEplot, names= ordnames, logy=normT1, samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+W <- split(ruv2T1$W,y.all$samples$cg_cov)
+W <- lapply(W, function(x) matrix(x, ncol = ncol(ruv2T1$W)))
+
+HistsT12 <- mapply(histT,y=ys.ct,w=W,samples=map(ys.ct,'samples'),SIMPLIFY = F)
+
+
+```
+
+
+
+```{r ruv2T1plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT12[[i]], SilplotsT12[[i]], RLEplotsT12[[i]], HistsT12[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+### RUVIII {.tabset} 
+
+```{r T1 RUVIII,results='hide', echo=FALSE}
+
+normT1 <- split(ruv3T1$newY,y.all$samples$cg_cov)
+normT1 <- mapply(function(x,y) {
+  mat=t(matrix(x, ncol = ncol(ruv3T1$newY)))
+  colnames(mat)=y$samples$sample_cell
+  rownames(mat)=colnames(ruv3T1$newY)
+  mat
+  },x=normT1,y=ys.ct, SIMPLIFY = F )
+
+hvgs <- lapply(normT1, highvarg)
+pcas <- mapply(calculatePCA,x=normT1, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(split(y.all$samples$Processing_Cohort,y.all$samples$cg_cov),as.integer) 
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell')
+
+SilplotsT13 <- lapply(silps,Silplot)
+
+PCAplotsT13 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT13 <- mapply(RLEplot, names= ordnames, logy=normT1, samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+W <- split(ruv3T1$W,y.all$samples$cg_cov)
+W <- lapply(W, function(x) matrix(x, ncol = ncol(ruv3T1$W)))
+
+HistsT13 <- mapply(histT,y=ys.ct,w=W,samples=map(ys.ct,'samples'),SIMPLIFY = F)
+
+
+```
+
+
+```{r ruv3T1plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT13[[i]], SilplotsT13[[i]], RLEplotsT13[[i]], HistsT13[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### RUV4 {.tabset} 
+
+
+```{r T1 RUV4, results='hide', echo=FALSE}
+
+normT1 <- split(ruv4T1$newY,y.all$samples$cg_cov)
+normT1 <- mapply(function(x,y) {
+  mat=t(matrix(x, ncol = ncol(ruv4T1$newY)))
+  colnames(mat)=y$samples$sample_cell
+  rownames(mat)=colnames(ruv4T1$newY)
+  mat
+  },x=normT1,y=ys.ct, SIMPLIFY = F )
+
+hvgs <- lapply(normT1, highvarg)
+pcas <- mapply(calculatePCA,x=normT1, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(split(y.all$samples$Processing_Cohort,y.all$samples$cg_cov),as.integer) 
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell')
+
+SilplotsT14 <- lapply(silps,Silplot)
+
+PCAplotsT14 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT14 <- mapply(RLEplot, names= ordnames, logy=normT1, samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+W <- split(ruv4T1$W,y.all$samples$cg_cov)
+W <- lapply(W, function(x) matrix(x, ncol = ncol(ruv3T1$W)))
+
+HistsT14 <- mapply(histT,y=ys.ct,w=W,samples=map(ys.ct,'samples'),SIMPLIFY = F)
+
+
+```
+
+
+
+```{r ruv4T1plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT14[[i]], SilplotsT14[[i]], RLEplotsT14[[i]], HistsT14[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+
+## T2 {.tabset}
+
+
+
+```{r T2, results='hide', echo=FALSE}
+
+Mcts.ct <- lapply (ys.ct, function(x){
+  Mct <- replicate.matrix(x$samples$ind_cov)
+  rownames(Mct) <- x$samples$ind_cov
+  Mct
+})
+
+
+ruv2T2 <- mapply(RUV2mod, Y = lapply(logys.ct,t), X = map(ys.ct,\(x) x$samples$fk.tr), Z = map(ys.ct,\(x) x$samples$pop_cov), ctl =  lapply(ys.ct, function (x) rownames(x) %in% hkGagnon[-high_varg]), k= k, SIMPLIFY=F)
+
+ruv3T2 <- mapply(RUVIIIW, Y = lapply(logys.ct,t), M=Mcts.ct , ctl =  lapply(ys.ct, function (x) rownames(x) %in% hkGagnon[-high_varg]), k= as.list(rep(k,length(celltypes))), return.info=as.list(rep(T,length(celltypes))), SIMPLIFY=F)
+
+ruv4T2 <- mapply(RUV4mod, Y = lapply(logys.ct, t), X = map(ys.ct,\(x) x$samples$fk.tr), ctl =  lapply(ys.ct, function (x) rownames(x) %in% hkGagnon[-high_varg]), k= as.list(rep(k,length(celltypes))), SIMPLIFY=F)
+
+```
+
+
+### RUV2 {.tabset} 
+
+```{r T2 RUV2, results='hide', echo=FALSE}
+
+
+
+normT2 <- lapply(ruv2T2,function (x) t(x$newY))
+hvgs <- lapply(normT2, highvarg)
+pcas <- mapply(calculatePCA,x=normT2, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT22 <- lapply(silps,Silplot)
+
+PCAplotsT22 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT22 <- mapply(RLEplot, names= ordnames, logy=normT2,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+
+HistsT22 <- mapply(histT,y=ys.ct,w=map(ruv2T2,"W"),map(ys.ct,'samples'),SIMPLIFY = F)
+
+
+```
+
+```{r ruv2T2plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT22[[i]], SilplotsT22[[i]], RLEplotsT22[[i]], HistsT22[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+
+### RUVIII {.tabset}
+
+```{r T2 RUV3, results='hide', echo=FALSE}
+
+normT2 <- lapply(ruv3T2,function (x) t(x$newY))
+hvgs <- lapply(normT2, highvarg)
+pcas <- mapply(calculatePCA,x=normT2, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT23 <- lapply(silps,Silplot)
+
+PCAplotsT23 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT23 <- mapply(RLEplot, names= ordnames, logy=normT2,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+
+HistsT23 <- mapply(histT,y=ys.ct,w=map(ruv3T2,"W"),map(ys.ct,'samples'),SIMPLIFY = F)
+
+
+```
+
+```{r ruv3T2plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT23[[i]], SilplotsT23[[i]], RLEplotsT23[[i]], HistsT23[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+### RUV4 {.tabset} 
+
+```{r T2 RUV4, results='hide', echo=FALSE}
+
+normT2 <- lapply(ruv4T2,function (x) t(x$newY))
+hvgs <- lapply(normT2, highvarg)
+pcas <- mapply(calculatePCA,x=normT2, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT24 <- lapply(silps,Silplot)
+
+PCAplotsT24 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT24 <- mapply(RLEplot, names= ordnames, logy=normT2,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+HistsT24 <- mapply(histT,y=ys.ct,w=map(ruv4T2,"W"),map(ys.ct,'samples'),SIMPLIFY = F)
+
+```
+
+
+```{r ruv4T2plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT24[[i]], SilplotsT24[[i]], RLEplotsT24[[i]], HistsT24[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+## T3 {.tabset}
+
+
+```{r T3}
+
+hk.ind <- rownames(PBC_S) %in% hkGagnon[-high_varg]
+y.bc <- PBC_S
+pmin.bc <- find_p(bc)
+y.bc <- calcNormFactors(y.bc, method="upperquartile", p=pmin.bc)
+nf.bc <- y.bc$samples$norm.factors
+logy.bc <- voom(y.bc)$E
+
+M.bc <- replicate.matrix(y.bc$samples$ind_cov)
+rownames(M.bc) <- y.bc$samples$ind_cov
+
+ruv2T3 <- RUV2mod(Y = t(logy.bc), X = y.bc$samples$fk.tr, Z=y.bc$samples$pop.cov , ctl = hk.ind, k=k)
+ruv3T3 <- RUVIIIW(Y = t(logy.bc), M = M.bc, ctl = hk.ind,  k = k, return.info = T)
+ruv4T3 <- RUV4mod(Y = t(logy.bc), X = y.bc$samples$fk.tr, Z=y.bc$samples$pop.cov , ctl = hk.ind, k=k)
+
+```
+
+### RUV2 {.tabset}
+
+
+```{r T3 RUV2, results='hide', echo=FALSE}
+
+normsT3 <- function(logy,ruv,y,bc){
+
+  indsamp.ct <- bc$samples$ind_cov_batch_cov %in% y$samples$ind_cov_batch_cov
+  indg.ct <- rownames(bc) %in% rownames(logy)
+  indg.ct2 <- rownames(logy) %in% rownames(bc)
+  
+  newY <- logy[indg.ct2,] - t(ruv$W[indsamp.ct,]%*%ruv$fullalpha[,indg.ct])
+  
+  return(newY)
+
+}
+
+histT3 <- function (y,w,bc){
+  
+  
+  indg.ct2 <- rownames(y) %in% rownames(bc)
+  y <- y[indg.ct2,]
+  samples <- y$samples
+  
+  indsamp.ct <- bc$samples$ind_cov_batch_cov %in% samples$ind_cov_batch_cov
+  w <-w[indsamp.ct,]
+  k <- ncol(w)
+  
+  
+  design <- model.matrix(~ samples$fk.tr + w ) 
+  colnames(design) <- c('Intercept','fk.tr', paste0("W",1:k))
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalsT <- topTable(efit, coef=2, number=dim(y)[1], adjust="BH")
+  
+  ggplot(pvalsT, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+}
+
+
+normT3 <- mapply(function(x,y) normsT3(logy= x,ruv=ruv2T3,y= y,bc=y.bc),x=logys.ct,y=ys.ct, SIMPLIFY = F)
+hvgs <- lapply(normT3, highvarg)
+pcas <- mapply(calculatePCA,x=normT3, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT32 <- lapply(silps,Silplot)
+
+PCAplotsT32 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT32 <- mapply(RLEplot, names= ordnames, logy=normT3,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+
+HistsT32 <- mapply(function(y)histT3(w=ruv2T3$W,bc=y.bc,y=y),y=ys.ct,SIMPLIFY = F)
+
+
+
+```
+
+```{r ruv2T3plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT32[[i]], SilplotsT32[[i]], RLEplotsT32[[i]], HistsT32[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+### RUVIII {.tabset}
+
+
+```{r T3 RUV3, results='hide', echo=FALSE}
+
+
+
+normT3 <- mapply(function(x,y) normsT3(logy= x,ruv=ruv3T3,y= y,bc=y.bc),x=logys.ct,y=ys.ct, SIMPLIFY = F)
+hvgs <- lapply(normT3, highvarg)
+pcas <- mapply(calculatePCA,x=normT3, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT33 <- lapply(silps,Silplot)
+
+PCAplotsT33 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT33 <- mapply(RLEplot, names= ordnames, logy=normT3,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+
+HistsT33 <- mapply(function(y)histT3(w=ruv3T3$W,bc=y.bc,y=y),y=ys.ct,SIMPLIFY = F)
+
+
+
+```
+
+```{r ruv3T3plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT33[[i]], SilplotsT33[[i]], RLEplotsT33[[i]], HistsT33[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### RUV4 {.tabset}
+
+```{r T3 RUV4, results='hide', echo=FALSE}
+
+normT3 <- mapply(function(x,y) normsT3(logy= x,ruv=ruv4T3,y= y,bc=y.bc),x=logys.ct,y=ys.ct, SIMPLIFY = F)
+hvgs <- lapply(normT3, highvarg)
+pcas <- mapply(calculatePCA,x=normT3, subset_row=hvgs, ncomponents=10, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT34 <- lapply(silps,Silplot)
+
+PCAplotsT34 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT34 <- mapply(RLEplot, names= ordnames, logy=normT3,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+
+HistsT34 <- mapply(function(y)histT3(w=ruv4T3$W,bc=y.bc,y=y),y=ys.ct,SIMPLIFY = F)
+
+
+
+```
+
+```{r ruv4T3plots , results='asis', echo=FALSE}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotsT34[[i]], SilplotsT34[[i]], RLEplotsT34[[i]], HistsT34[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```

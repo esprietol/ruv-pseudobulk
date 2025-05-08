@@ -1,0 +1,1194 @@
+---
+title: "Study case"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message = FALSE, warning = FALSE, fig.height=8, fig.width=11)
+library(knitr)
+library(tidyverse)
+library(BiocManager)
+library(scuttle)
+library(scater)
+library(uwot)
+library(edgeR)
+library(ruv)
+library(Seurat)
+library(swapper)
+library(cluster)
+library(factoextra)
+library(UpSetR)
+library(foreach)
+library(msigdbr)
+
+
+source("/mnt/auxf.R")
+
+
+#ds <- readRDS("/domino/datasets/local/RUV/sclupusds4.rds")
+PBC <- readRDS("/domino/datasets/local/RUV/pblupusds4.rds")
+path <- ('/domino/datasets/local/RUV')
+
+
+```
+
+```{r DGE Processing cohorts}
+
+DiffGPCs <- readRDS("/domino/datasets/local/RUV/DiffGPCs_popE.rds")
+
+topallDPC <- lapply(DiffGPCs, function (x) dplyr::arrange(x,P.Value))
+#logFC_PC <- lapply(topallDPC, function(x) dplyr::select(x,logFC))
+
+DiffPC.sig<- lapply(DiffGPCs, function (x) dplyr::filter(x,adj.P.Val<0.01))
+topDPC <- lapply(DiffPC.sig, function(x) arrange(x,P.Value) )
+#logFC_PC <- lapply(topDPC, function(x) x$logFC)
+
+
+```
+
+```{r DGE Processing cohorts alt code, include=FALSE}
+# Alternatively
+
+# ds2 <- readRDS("/domino/datasets/local/RUV/sclupusds2.rds")
+# ds2 <- ds2[,ds2$Sex=='Female'] # remove male samples
+# Idents(object = ds2) <- "cg_cov"
+# celltypes <- c('B', 'NK', 'T4', 'T8', 'cDC', 'cM', 'ncM', 'pDC')
+# ds2s <- subset(x = ds2, idents = celltypes)
+# rm(list = 'ds2')
+# 
+# pdata <- droplevels(ds2s@meta.data)
+# pdata$Age <- as.numeric(as.character(pdata$Age))
+# 
+# ds2s <- SetIdent(ds2s, value = "sample_cell") # change ident to group later
+# ds2s <- FindVariableFeatures(ds2s) #### adds metafeatures on ds2s@assays[["originalexp"]]@meta.features
+# ds2s <- ScaleData(ds2s) #### adds scaledata on ds2s@assays[["originalexp"]]@data
+# 
+# PBC <- AggregateExpression(ds2s, group_by = "sample_cell", assays = 'originalexp',slot='counts', return.seurat = F)
+# PBC <- PBC$originalexp # same result than manual procedure
+# colnames(PBC) <- unique(pdata$sample_cell)
+# metacovs <- colnames(pdata)[c(4:6,8,10:16, 18:19)] # variables at type cell-sample level
+# pbc.metaD <- unique(pdata[,metacovs])
+# rownames(pbc.metaD) <- pbc.metaD$sample_cell
+# pbc.metaD$Age <- as.numeric(as.character(pbc.metaD$Age))
+# 
+# PBC <- PBC[rowSums(PBC >= 5) >= 5,]
+# gene.D <- data.frame(gene=rownames(PBC))
+# rownames(gene.D) <- gene.D$gene
+# 
+# 
+#  DEGPC24 <- foreach(ct = celltypes) %do% {
+# 
+#    pbc.ct <- PBC[,pbc.metaD$cg_cov==ct]
+#    pbc.ct <-  pbc.ct[rowSums(pbc.ct >= 5) >= 5,]
+#    gene.D.ct <- gene.D[ rownames(pbc.ct),]
+# 
+#    y.ct <- DGEList(counts=pbc.ct )
+#    pmin.ct <- find_p(pbc.ct )
+#    y.ct <- calcNormFactors(y.ct, method="upperquartile", p=pmin.ct)
+#    nf.ct <- y.ct$samples$norm.factors
+#    logy.ct <- edgeR::cpm(y.ct,log = T)
+# 
+#    design <- model.matrix(~ 0 + pbc.metaD$Processing_Cohort[pbc.metaD$cg_cov==ct] )
+#    colnames(design) <- c('PC1','PC2', 'PC3', 'PC4')
+#    v <- voom(y.ct, design, plot=F)
+#    vfit <- lmFit(v, design)
+# 
+#    contrast.matrix <- makeContrasts(
+#      PC2 - PC1, PC3 - PC1, PC4 - PC1, PC3 - PC2, PC4 - PC2, PC4 - PC3,
+#      levels = colnames(design)
+#    )
+# 
+#    # Fit contrasts
+# 
+#    vfit <- contrasts.fit(vfit, contrast.matrix)
+#    efit <- eBayes(vfit)
+#    topTable(efit, number=dim(y.ct)[1], coef= "PC4 - PC2", adjust="BH") # previously I was taking just the F statistic, but here I focused on the PC 2 and PC 4
+# 
+#  }
+# 
+#  names(DEGPC24)<- celltypes
+# 
+#  saveRDS(DEGPC24,paste0(path,'/DiffGPC24.rds'))
+
+
+
+```
+
+```{r Negative control genes}
+
+hkGagnon <- read.csv(paste0(path,"/Genes_Gagnon.txt"), sep="")
+hkGagnon <- unlist(hkGagnon)
+filter.vst<-FindVariableFeatures(PBC,selection.method = 'vst')
+high_varg <- which(filter.vst[hkGagnon,]$vst.variance.standardized>1.8)
+hk.ind <- rownames(PBC) %in% hkGagnon[-high_varg]
+
+hkScmerge <- read.csv(paste0(path,"/ncgSCmerge.txt"), sep="",header = F)
+hkScmerge <- unlist(hkScmerge)
+high_varg.sc <- which(filter.vst[hkScmerge,]$vst.variance.standardized>1.8)
+hk.ind2 <- rownames(PBC) %in% hkGagnon[-high_varg.sc]
+
+gene.D <- data.frame(gene=rownames(PBC))
+rownames(gene.D) <- gene.D$gene
+celltypes <- levels(PBC$samples$cg_cov)
+
+
+```
+
+```{r pbps read}
+
+PBPSC <- readRDS( "/domino/datasets/local/RUV/pbps10rep_studycasemix.rds")
+
+
+# Alternatively: 
+
+# PBPSC <- gen_PBPS(ds=ds, PBC=PBC, ctype='cg_cov', BioVar=c('Status','cg_cov','pop_cov'), NVar='Processing_Cohort', id_pb='sample_cell', id_sub='ind_cov', cell_id='cell_id', n=10, Seed=2 )
+# 
+# write_rds(PBPSC, "/domino/datasets/local/RUV/pbps10rep_studycasemix.rds")
+
+```
+
+# Dataset
+
+We have N = `r length(unique(PBC$samples$ind_cov_batch_cov))` single-cell samples from J = `r length(unique(PBC$samples$ind_cov))` subjects selected from the lupus dataset, distributed as follows: 
+
+```{r subset}
+
+group_by(PBC$samples,Processing_Cohort,ind_cov,pop_cov,Age,Status) %>%
+  summarise(count=n()) %>% ungroup()%>% 
+  mutate(ind_cov=str_extract(as.character(ind_cov),"[^_]+$")) %>%
+  ggplot(aes(y=ind_cov,x=Processing_Cohort, group=ind_cov, color=Status, shape = pop_cov)) +
+  geom_point(size=2) + geom_line() + scale_colour_brewer(palette='Set1') +
+  labs(y = "Subject", x= "Processing cohort", color = "Status", shape = "Ethnicity")+ theme_minimal()+
+  ggtitle('Samples')
+
+
+```
+
+
+The dataset has no technical replicates between the healthy controls of processing cohorts 2 and 4. There is also a confounding effect between processing cohorts and the disease status, observed for instance in the PCA of the CD4 T-cells
+
+
+<!-- ## Metrics functions -->
+
+```{r metrics}
+
+split.ct <- function(PBC,ct){
+  
+  y.ct <- PBC[rowSums(PBC$counts >= 10) >= 5,PBC$samples$cg_cov==ct]
+  pmin <- find_p(y.ct)
+  y.ct <- calcNormFactors(y.ct, method="upperquartile", p=pmin)
+  
+return(y.ct)
+}
+
+PCAplot <- function (pca,y,avg_sw2=F,avg_swp=F){
+  
+  if(isTRUE(avg_sw2|avg_swp)){
+   labelgg <- paste0(c('2 PCs: ','10 PCs: '), c(avg_sw2,avg_swp)) 
+  }else{
+   labelgg <- ""
+  }
+  
+  if(is.null(rownames(pca))){
+    rownames(pca)<- y$samples$sample_cell
+  }
+  
+  pos_x <- min(pca[,1])
+  pos_y <- min(pca[,2]) 
+  ppca <- data.frame(pca) %>%
+  tibble::rownames_to_column("sample_cell") %>% # Add the metadata into this data frame; match by sample IDs
+  dplyr::inner_join(y$samples, by = "sample_cell") %>%
+  ggplot(aes(x = PC1,y = PC2,color= Processing_Cohort)) + geom_point(aes(shape=Status),size=3) + 
+    #ggtitle("Logcpm plot") +
+    labs(color = "Processing cohort", shape = "Status") + 
+    theme_minimal()+ theme(legend.position = "bottom") + scale_color_brewer(palette='Set1')+
+    annotate("text", x = c(pos_x+3,pos_x+3), y = c(pos_y+3, pos_y), label = labelgg, size=3, fontface="bold")
+    
+  return(ppca)
+  
+}
+
+Silplot <- function (sil){
+  
+  fviz_silhouette(sil)+ scale_fill_brewer(palette = 'Set1') + 
+    scale_color_brewer(palette = 'Set1') + theme_minimal() +
+    theme(axis.text.x=element_blank(),legend.position = "bottom") +
+    labs(fill="Processing Cohort",color="Processing Cohort")
+}
+
+RLEplot <-function(names, logy, samples){
+   
+  median <- apply(logy, 1, median)
+  samples <- as.data.frame(samples)
+  
+  rle <- apply(logy, 2, function(x) x - median)
+  dataplot <- as.data.frame(rle) %>% 
+    pivot_longer(everything(),names_to = 'sample_cell') %>% 
+    left_join(samples, by='sample_cell')
+  
+  dataplot$sample_cell <- fct_relevel(dataplot$sample_cell,names)
+  
+  ggplot(dataplot,aes(x=sample_cell, y=value,colour = Processing_Cohort, linetype=pop_cov )) +
+    geom_boxplot(outlier.shape = NA) + ylim(-2,2) + scale_color_brewer(palette='Set1') + ggtitle("RLE plot") +
+     geom_hline(yintercept=0, linetype='dashed') + labs(y="Relative log expression", color='Processing cohort')+
+    theme_minimal()+ theme( legend.position = 'bottom',strip.text =element_blank(),
+                            axis.title.x = element_blank(),
+                            axis.text.x = element_blank(),
+                            axis.ticks.x = element_blank())
+
+}
+
+histpvals <- function(y,topDPC){
+  
+  design <- model.matrix(~ y$samples$Status ) 
+  colnames(design) <- c('Intercept','Managed')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalsUQ <- topTable(efit, coef=2, number=dim(y)[1], adjust="BH")
+  pvalsUQ <- arrange(pvalsUQ, P.Value)
+  
+  pos <- which(abs(pvalsUQ$adj.P.Val-0.01)==min(abs(pvalsUQ$adj.P.Val-0.01))) 
+  q.val <- pvalsUQ$P.Value[pos[1]]
+  vp <- rownames_to_column(pvalsUQ,'gene')%>% mutate(DEP=if_else(gene %in% rownames(topDPC),T,F)) %>% ggplot( aes(x=logFC,y=-log10(P.Value), color= DEP))+ geom_point(alpha=0.5)+ geom_hline(aes(yintercept=-log10(q.val)),colour='darkgrey' )+ scale_color_brewer(palette='Set1') + ggtitle("Volcano plot") + theme_minimal()
+  p <- ggplot(pvalsUQ, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+  
+  
+  
+  return(list(pvals=pvalsUQ,hist =p,volcano=vp))
+  
+}
+
+logfcs <- function(DPC, pvals,names=c('disease status','UQ')){
+  
+  colnames(DPC) <- paste0(colnames(DPC),'_pc')
+  
+  datatoplot <- inner_join(rownames_to_column(DPC,'gene'),rownames_to_column(pvals,'gene'), by='gene')
+  
+  cormethods <- paste0('Cor: ',round(cor(datatoplot$logFC_pc,datatoplot$logFC),2))
+  
+  pos_x <- min(datatoplot$logFC_pc)
+  pos_y <- min(datatoplot$logFC)
+  
+  ggplot(datatoplot, aes(x=logFC_pc, y=logFC))+geom_point()+ #scale_color_continuous(type = "viridis")+
+    labs(x =paste0("LogFC ",names[1]), y = paste0("LogFC ",names[2])) + 
+    theme_minimal()+ theme(legend.position = "bottom") + ggtitle('Log Fold Changes')+
+    annotate("label", x = pos_x+1, y = pos_y, label = cormethods, size=3, fontface="bold")
+
+  
+  
+}
+
+stvar <- function (logy){
+  
+ top_high_varg.ct <- FindVariableFeatures(logy)
+top_high_varg.ct <- rownames(arrange(top_high_varg.ct,-vst.variance.standardized))[1:500]
+return(top_high_varg.ct)
+}
+
+
+
+
+```
+
+
+
+## Unwanted variation in the data {.tabset}
+
+
+```{r raw data, results='hide'}
+
+ys.ct <- lapply(celltypes,split.ct,PBC=PBC)
+
+logys.ct <- lapply(ys.ct,function (x) voom(x,plot=F)$E)
+  
+hvg <- lapply(logys.ct,stvar)
+pcas <- mapply(calculatePCA, x= logys.ct, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+# pcos <- lapply(pcos, function (x) {x[x==3]<-4; x})
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+  
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+Silplots <- lapply(silps,Silplot)
+
+PCAplots <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplots <- mapply(RLEplot, names= ordnames, logy=logys.ct,samples=map(ys.ct, "samples"), SIMPLIFY = F)
+
+
+```
+
+
+```{r rawpcaplots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplots[[i]],Silplots[[i]], RLEplots[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=1,ncol=3, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+## Naive DEA {.tabset}
+
+Volcano Plot with differentially expressed genes across processing cohorts in blue
+
+<!-- ### Code -->
+
+```{r DEA Naive}
+
+Hists <- mapply(histpvals,y=ys.ct,topDPC=topDPC,SIMPLIFY = F)
+
+
+```
+
+
+```{r DErawplots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( Hists[[i]]$hist, Hists[[i]]$volcano 
+                 )
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=1,ncol=2))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+```{r export raw T4, include=FALSE}
+
+PCAplot(pca= pcas[[3]], y=ys.ct[[3]], avg_sw2 = avgs_sw2[[3]] ,avg_swp = avgs_swp[[3]] ) 
+ggsave(paste0(path,'/paper/graphs/studycase/T4PCArawSCm.png'),height = 5, width = 7)
+
+RLEplots[[3]]
+ggsave(paste0(path,'/paper/graphs/studycase/T4RLErawSCm.png'),height = 5, width = 7)
+
+Hists[[3]]$hist
+ggsave(paste0(path,'/paper/graphs/studycase/T4histrawSCm.png'),height = 5, width = 7)
+
+```
+
+
+## {-}
+
+# Analysis
+
+
+We will evaluate the PCA plots and average silhouette width (ASW) using the processing cohort as label, from the normalised matrices returned from the RUVIII and RUVIII PBPS methods, and the normalised matrix obtained by subtracting the processing cohort effect. We also include the p-value histogram and the volcano plot from the differential expression analysis between patients and controls.
+
+
+## Including the processing cohort effect {.tabset}
+
+<!-- ### Code -->
+
+```{r pc, results = 'hide'}
+
+normpc <- function(y){
+  logy <- voom(y,plot=F)$E
+  design <- model.matrix(~ y$samples$Status + y$samples$Processing_Cohort + y$samples$pop_cov + y$samples$Status*y$samples$pop_cov ) 
+  #colnames(design) <- c('Intercept','tr',paste0('Proc',  c(2,4)))
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  alpha <- vfit$coefficients[,3:5] # same coefficients as efit and returned by toptable
+  newY <- logy - t(design[,c(3:5)]%*%t(alpha))
+  return(newY)
+}
+
+histpc <- function(y,topDPC){
+  logy <- voom(y,plot=F)$E
+  design <- model.matrix(~ y$samples$Status + y$samples$Processing_Cohort + y$samples$pop_cov + y$samples$Status*y$samples$pop_cov ) 
+  colnames(design) <- c('Intercept','tr',paste0('Proc',  c(2,3,4)),'pop','interaction')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalstr <- topTable(efit,coef=2, number=dim(y)[1], adjust="BH")
+  pvalsint <- topTable(efit,coef=6, number=dim(y)[1], adjust="BH")
+  contrast.matrix <- makeContrasts(
+      SLEeuro =tr,
+      SLEasian = interaction,
+      levels = colnames(design))
+    
+    vfit <- contrasts.fit(vfit, contrast.matrix)
+    efit <- eBayes(vfit)
+  pvalspc <- topTable(efit, number=dim(y)[1], adjust="BH")
+  
+  pos <- which(abs(pvalstr$adj.P.Val-0.01)==min(abs(pvalstr$adj.P.Val-0.01))) 
+  q.val <- pvalstr$P.Value[pos[1]]
+  vptr <- rownames_to_column(pvalstr,'gene')%>% mutate(DEP=if_else(gene %in% rownames(topDPC),T,F)) %>% ggplot( aes(x=logFC,y=-log10(P.Value), color= DEP))+ geom_point(alpha=0.5)+ geom_hline(aes(yintercept=-log10(q.val)),colour='darkgrey' )+ scale_color_brewer(palette='Set1') + ggtitle("Volcano plot SLE") + theme_minimal()
+  
+  pos <- which(abs(pvalsint$adj.P.Val-0.01)==min(abs(pvalsint$adj.P.Val-0.01))) 
+  q.val <- pvalsint$P.Value[pos[1]]
+  vpint <- rownames_to_column(pvalsint,'gene')%>% mutate(DEP=if_else(gene %in% rownames(topDPC),T,F)) %>% ggplot( aes(x=logFC,y=-log10(P.Value), color= DEP))+ geom_point(alpha=0.5)+ geom_hline(aes(yintercept=-log10(q.val)),colour='darkgrey' )+ scale_color_brewer(palette='Set1') + ggtitle("Volcano plot SLE*Ethnicity") + theme_minimal()
+
+  p <- ggplot(pvalspc, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+ 
+  return(list(pvals=pvalspc, pvalstr=pvalstr, pvalsint=pvalsint, hist =p, volcano=vptr, volcano_int=vpint))
+  
+  
+  
+}
+
+
+normpcs.ct <- lapply(ys.ct,normpc)
+hvg <- lapply(normpcs.ct,stvar)
+pcas <- mapply(calculatePCA, x= normpcs.ct, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+pcos <- lapply(ys.ct, function (x) as.integer(x$samples$Processing_Cohort))
+# pcos <- lapply(pcos, function (x) {x[x==3]<-4; x})
+
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+  
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+Silplots <- lapply(silps,Silplot)
+
+PCAplots <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplots <- mapply(RLEplot, names= ordnames, logy=normpcs.ct, samples=map(ys.ct, "samples"), SIMPLIFY = F)
+
+HistsB <- mapply(histpc, y=ys.ct,topDPC=topDPC,SIMPLIFY = F)
+  
+
+  
+```
+
+### Normalisation {.tabset}
+
+```{r PCplots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( PCAplots[[i]],Silplots[[i]], RLEplots[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=1,ncol=3, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### DEA {.tabset}
+
+```{r DEbatchplots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( HistsB[[i]]$hist,HistsB[[i]]$volcano,HistsB[[i]]$volcano_int)
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+```{r export Batch T4, include=FALSE}
+
+PCAplot(pca= pcas[[3]], y=ys.ct[[3]], avg_sw2 = avgs_sw2[[3]] ,avg_swp = avgs_swp[[3]] ) 
+ggsave(paste0(path,'/paper/graphs/studycase/T4PCABatchSCm.png'),height = 5, width = 7)
+
+RLEplots[[3]]
+ggsave(paste0(path,'/paper/graphs/studycase/T4RLEBatchSCm.png'),height = 5, width = 7)
+
+HistsB[[3]]$hist
+ggsave(paste0(path,'/paper/graphs/studycase/T4histBatchSCm.png'),height = 5, width = 7)
+
+```
+
+## RUVIIIgb {.tabset}
+
+<!-- ### Code -->
+  
+```{r ruv3, results='hide'}
+
+histT <- function (y,w,topDPC,samples){
+  k <- ncol(w)
+  design <- model.matrix(~ samples$Status + w + samples$pop_cov + samples$Status*samples$pop_cov ) 
+  colnames(design) <- c('Intercept','tr', paste0("W",1:k),'pop','interaction')
+  v <- voom(y, design, plot=F) 
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pvalstr <- topTable(efit,coef=2, number=dim(y)[1], adjust="BH")
+  pvalsint <- topTable(efit,coef=6, number=dim(y)[1], adjust="BH")
+  contrast.matrix <- makeContrasts(
+      SLEeuro =tr,
+      SLEasian = interaction,
+      levels = colnames(design))
+    
+    vfit <- contrasts.fit(vfit, contrast.matrix)
+    efit <- eBayes(vfit)
+  pvalsT <- topTable(efit, number=dim(y)[1], adjust="BH")
+  
+  pos <- which(abs(pvalstr$adj.P.Val-0.01)==min(abs(pvalstr$adj.P.Val-0.01))) 
+  q.val <- pvalstr$P.Value[pos[1]]
+  vptr <- rownames_to_column(pvalstr,'gene')%>% mutate(DEP=if_else(gene %in% rownames(topDPC),T,F)) %>% ggplot( aes(x=logFC,y=-log10(P.Value), color= DEP))+ geom_point(alpha=0.5)+ geom_hline(aes(yintercept=-log10(q.val)),colour='darkgrey' )+ scale_color_brewer(palette='Set1') + ggtitle("Volcano plot SLE") + theme_minimal()
+  
+  pos <- which(abs(pvalsint$adj.P.Val-0.01)==min(abs(pvalsint$adj.P.Val-0.01))) 
+  q.val <- pvalsint$P.Value[pos[1]]
+  vpint <- rownames_to_column(pvalsint,'gene')%>% mutate(DEP=if_else(gene %in% rownames(topDPC),T,F)) %>% ggplot( aes(x=logFC,y=-log10(P.Value), color= DEP))+ geom_point(alpha=0.5)+ geom_hline(aes(yintercept=-log10(q.val)),colour='darkgrey' )+ scale_color_brewer(palette='Set1') + ggtitle("Volcano plot SLE*Ethnicity") + theme_minimal()
+
+  p <- ggplot(pvalsT, aes(x=P.Value)) + geom_histogram(bins=15) + scale_color_brewer(palette='Set1') + ggtitle("P-values histogram") + theme_minimal()
+  
+  return(list(pvals=pvalsT, pvalstr=pvalstr, pvalsint=pvalsint, hist=p, volcano=vptr, volcano_int=vpint))
+  
+  
+}
+
+k=3
+  
+Mcts.ct <- lapply (ys.ct, function(x){
+  Mct <- replicate.matrix(x$samples$ind_cov)
+  rownames(Mct) <- x$samples$ind_cov
+  Mct
+})
+
+ruv3T2 <- mapply(RUVIIIW, Y = lapply(logys.ct,t), M=Mcts.ct , ctl =  lapply(ys.ct, function (x) rownames(x) %in% hkGagnon[-high_varg]), k= as.list(rep(k,length(celltypes))), return.info=as.list(rep(T,length(celltypes))), SIMPLIFY=F)
+
+normT2 <- lapply(ruv3T2,function (x) t(x$newY))
+
+hvg <- lapply(normT2,stvar)
+pcas <- mapply(calculatePCA, x= normT2, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT23 <- lapply(silps,Silplot)
+
+PCAplotsT23 <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT23 <- mapply(RLEplot, names= ordnames, logy=normT2,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+HistsT23 <- mapply(histT,y=ys.ct,w=map(ruv3T2,"W"), topDPC=topDPC, map(ys.ct,'samples'), SIMPLIFY = F)
+  
+#LFCplots <- mapply(function (x,y) logfcs(DPC=x, pvals=y$pvals,names=c('True','RUVIII')),x=trueLFC, y=HistsT23, SIMPLIFY=F)
+
+ 
+```
+
+
+### Normalisation {.tabset}
+
+
+```{r ruv3plots gagnon , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( PCAplotsT23[[i]],SilplotsT23[[i]], RLEplotsT23[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=1,ncol=3, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### DEA {.tabset}
+
+
+```{r DE3plots gagnon, results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( HistsT23[[i]]$hist,HistsT23[[i]]$volcano,HistsT23[[i]]$volcano_int)
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+```{r export ruv3 T4 gagnon, include=FALSE}
+
+PCAplot(pca= pcas[[3]], y=ys.ct[[3]], avg_sw2 = avgs_sw2[[3]] ,avg_swp = avgs_swp[[3]] ) 
+ggsave(paste0(path,'/paper/graphs/studycase/T4PCA3SCm.png'),height = 5, width = 7)
+
+RLEplotsT23[[3]]
+ggsave(paste0(path,'/paper/graphs/studycase/T4RLE3SCm.png'),height = 5, width = 7)
+
+HistsT23[[3]]$hist
+ggsave(paste0(path,'/paper/graphs/studycase/T4hist3SCm.png'),height = 5, width = 7)
+
+```
+
+
+## RUVIII scmerge {.tabset}
+
+<!-- ### Code -->
+  
+```{r ruv3 scmerge, results='hide'}
+
+
+ruv3T2scm <- mapply(RUVIIIW, Y = lapply(logys.ct,t), M=Mcts.ct , ctl =  lapply(ys.ct, function (x) rownames(x) %in% hkScmerge[-high_varg]), k= as.list(rep(k,length(celltypes))), return.info=as.list(rep(T,length(celltypes))), SIMPLIFY=F)
+
+normT2scm <- lapply(ruv3T2scm,function (x) t(x$newY))
+
+hvg <- lapply(normT2scm,stvar)
+pcas <- mapply(calculatePCA, x= normT2scm, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+SilplotsT23scm <- lapply(silps,Silplot)
+
+PCAplotsT23scm <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsT23scm <- mapply(RLEplot, names= ordnames, logy=normT2scm,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+HistsT23scm <- mapply(histT,y=ys.ct,w=map(ruv3T2scm,"W"),topDPC=topDPC,map(ys.ct,'samples'),SIMPLIFY = F)
+  
+#LFCplotsscm <- mapply(function (x,y) logfcs(DPC=x, pvals=y$pvals,names=c('True','RUVIII')),x=trueLFC, y=HistsT23scm, SIMPLIFY=F)
+
+ 
+```
+
+
+### Normalisation {.tabset}
+
+
+```{r ruv3plots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( PCAplotsT23scm[[i]], SilplotsT23scm[[i]], RLEplotsT23scm[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=1,ncol=3, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### DEA {.tabset}
+
+
+```{r DE3plots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( HistsT23scm[[i]]$hist,HistsT23scm[[i]]$volcano, HistsT23scm[[i]]$volcano_int#,LFCplotsscm[[i]]
+                 )
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+```{r export ruv3 T4, include=FALSE}
+
+PCAplot(pca= pcas[[3]], y=ys.ct[[3]], avg_sw2 = avgs_sw2[[3]] ,avg_swp = avgs_swp[[3]] ) 
+ggsave(paste0(path,'/paper/graphs/studycase/T4PCA3SCm.png'),height = 5, width = 7)
+
+RLEplotsT23scm[[3]]
+ggsave(paste0(path,'/paper/graphs/studycase/T4RLE3SCm_scMerge.png'),height = 5, width = 7)
+
+HistsT23scm[[3]]$hist
+ggsave(paste0(path,'/paper/graphs/studycase/T4hist3SCm_scMerge.png'),height = 5, width = 7)
+
+```
+
+## Common DEG {.tabset}
+
+<!-- ### Code -->
+```{r rank comp}
+
+DEGs <- function(x){
+  
+  rownames(x$pvals)[x$pvals$adj.P.Val< 0.01]
+}
+    
+
+DegsUQ <- lapply(Hists,DEGs)
+DegsB <- lapply(HistsB ,DEGs)
+Degs3 <- lapply(HistsT23,DEGs)
+Degs3scm <- lapply(HistsT23scm,DEGs)
+ISGsignature <- read.table("/domino/datasets/local/RUV/ISGsignature.txt", quote="\"", comment.char="",header = T)
+
+ISGsignature <- unlist(ISGsignature, use.names = F)
+DEGsISG <- lapply(1:8,function(x) ISGsignature)
+
+Degstoplot <- mapply(function(v,w,x,y,s) list(ISG=v,UQ=w,Batch=x,RUVIIIgb=y,
+                                                RUVIIIscM=s),v=DEGsISG, w=DegsUQ,x=DegsB,y=Degs3, s=Degs3scm, SIMPLIFY = F)
+
+
+upsetPlots <- lapply(Degstoplot[1:7], function(x) upset(fromList(x),order.by = "freq") )
+
+degs_methods <- list_transpose(Degstoplot)
+
+ISGdetect <- sapply(degs_methods,function (x) rowSums(sapply(x, function (y) ISGsignature %in% y)))
+
+
+rownames(ISGdetect)<- ISGsignature
+ISGdetect <- as.data.frame(ISGdetect)
+ISGdetect$rank <- 1:100
+ISGmissRUVIII <- dplyr::select(ISGdetect,-ISG)%>%filter(UQ==0|Batch==0|RUVIIIgb==0|RUVIIIscM==0)
+
+
+```
+
+
+```{r upsetplots , results='asis'}
+
+for (i in 1:(length(celltypes)-1)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+ 
+  print(upsetPlots[[i]] )
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+
+### Signauture genes not detected
+
+```{r ISGmissRUVIII , results='asis'}
+
+print(knitr::kable(ISGmissRUVIII))
+
+```
+
+
+```{r t4 upset, include=FALSE}
+
+
+
+jpeg(file = paste0(path,'/paper/graphs/studycase/T4upsetSCmRUVIII_scMerge.png'),height = 500, width = 700)
+upsetPlots[[3]]
+dev.off()
+
+
+
+```
+
+
+## Gene enrichment RUVIII {.tabset}
+
+
+```{r gsea}
+
+all_gene_sets <- msigdbr(species = "Homo sapiens",category = "C5", subcategory='BP')
+genes_padj <- function (pvaltab, q=0.01){
+  genes_padj <- rownames(pvaltab[pvaltab$adj.P.Val<0.01,])
+  return(genes_padj)
+  
+}
+
+gseasUQ <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=Hists, y=ys.ct, SIMPLIFY=F)
+
+gseasBatch <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=HistsB, y=ys.ct, SIMPLIFY=F)
+
+gseasRUVIIIbg <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=HistsT23, y=ys.ct, SIMPLIFY=F)
+
+
+gseasRUVIIIsc <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=HistsT23scm, y=ys.ct, SIMPLIFY=F)
+
+
+ISGgseas <-  mapply(function(y) gsea(ISGsignature,background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000), y=ys.ct, SIMPLIFY=F)
+
+
+```
+
+```{r comp}
+
+gseaGenes <- function (gseas){
+  gseas[gseas$padj<0.01,]$geneSet
+}
+
+
+estoplot <- mapply(function(v,w,x,y,s) list(ISG=gseaGenes(v),UQ=gseaGenes(w),Batch=gseaGenes(x),RUVIIIgb=gseaGenes(y),
+                                                RUVIIIscM=gseaGenes(s)),v=ISGgseas, w=gseasUQ ,x=gseasBatch,y=gseasRUVIIIbg,
+                     s=gseasRUVIIIsc, SIMPLIFY = F)
+
+upsetPlotses <- lapply(estoplot[1:7], function(x) upset(fromList(x),order.by = "freq") )
+
+geas_methods <- list_transpose(estoplot)
+ISGdetect <- sapply(geas_methods,function (x) rowSums(sapply(x, function (y) gseaGenes(ISGgseas[[1]]) %in% y)))
+
+rownames(ISGdetect)<- gseaGenes(ISGgseas[[1]])
+ISGdetect <- as.data.frame(ISGdetect)
+ISGdetect$rank <- 1:length(gseaGenes(ISGgseas[[1]]))
+ISGmissgsRUVIII <- dplyr::select(ISGdetect,-ISG)%>%filter(UQ==0|Batch==0|RUVIIIgb==0|RUVIIIscM==0)
+
+
+
+```
+
+```{r upset gseas, results='asis'}
+
+
+for (i in 1:(length(celltypes)-1)){
+
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  print(upsetPlotses[[i]])
+  
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+
+
+
+
+```
+
+
+```{r export RUVIII gsea, include=FALSE}
+
+
+for(i in c(3,4,6,7)){
+ jpeg(file = paste0(path,'/paper/graphs/studycase/',celltypes[i],'GSEAupsetSCmRUVIII.png'),height = 500, width = 700)
+print(upsetPlotses[[i]])
+
+dev.off() 
+}
+
+
+```
+
+
+## Different results in RUVIII GSEA {.tabset}
+
+```{r ruvIII diffs , results='asis'}
+gseas_methods <- list_transpose(estoplot)
+onlygb <- mapply(setdiff,x=gseas_methods$RUVIIIgb,y= gseas_methods$RUVIIIscM)
+onlysc <- mapply(setdiff,y=gseas_methods$RUVIIIgb,x= gseas_methods$RUVIIIscM)
+diffs <- mapply( function (x,y) data.frame(GOset = c(x,y))%>% mutate(RUVIIIGB= as.numeric(GOset %in% x) , RUVIIIscm= as.numeric(GOset %in% y)), x=onlygb,y=onlysc, SIMPLIFY = FALSE)
+
+lapply(diffs, nrow)
+
+for (i in 1:(length(celltypes)-1)){
+
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {.tabset}\n')))
+  print(knitr::kable(diffs[[i]]))
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+}
+
+```
+
+
+
+
+## RUVIII PBPS{.tabset}
+
+<!-- ### Code -->
+
+```{r ruv3pbps, include=FALSE}
+k=3
+
+psys.ct <- lapply(celltypes,split.ct,PBC=PBPSC)
+pslogys.ct <- lapply(psys.ct,function(x)voom(x,plot=F)$E)
+psMcts.ct <- lapply (psys.ct, function(x){
+  Mct <- replicate.matrix(x$samples$ind_cov)
+  rownames(Mct) <- x$samples$ind_cov
+  Mct
+})
+
+ruv3ps <- mapply(RUVIIIW, Y = lapply(pslogys.ct,t), M=psMcts.ct , ctl =  lapply(psys.ct, function (x) rep(T, nrow(x))), k= as.list(rep(k,length(celltypes))), return.info=as.list(rep(T,length(celltypes))), SIMPLIFY=F)
+
+
+normpsfull <- lapply(ruv3ps, function (x) t(x$newY))
+
+hvg <- lapply(normpsfull,stvar)
+pcas <- mapply(calculatePCA, x= normpsfull, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+PCAplotspsfull <- mapply(PCAplot, pca= pcas, y=psys.ct, SIMPLIFY = F)
+
+orig.s <- lapply(psys.ct, function(x) x$samples$sample_cell[x$samples$pbps==0])
+normps <- mapply(function (x,y) t(x$newY[y,]), x=ruv3ps,y=orig.s, SIMPLIFY = F)
+
+hvg <- lapply(normps,stvar)
+pcas <- mapply(calculatePCA, x= normps, ncomponents=rep(10,length(logys.ct)), subset_row=hvg, SIMPLIFY = F)
+
+sil2s <- mapply(silhouette,x=pcos,dist=lapply(pcas,function(x) dist(x[,1:2],"euclidean") ), SIMPLIFY = F)
+silps <- mapply(silhouette,x=pcos,dist=lapply(pcas,dist, "manhattan") ,SIMPLIFY = F)
+
+avgs_sw2 <- lapply(sil2s, function (x) round(mean(x[,3]),2))
+avgs_swp <- lapply(silps, function (x) round(mean(x[,3]),2))
+
+ordnames <- lapply(ys.ct, function (x) arrange(x$samples,Processing_Cohort)$'sample_cell') 
+
+Silplotsps<- lapply(silps,Silplot)
+
+PCAplotsps <- mapply(PCAplot, pca= pcas, y=ys.ct, SIMPLIFY = F)
+
+RLEplotsps <- mapply(RLEplot, names= ordnames, logy=normps,samples= map(ys.ct,'samples'), SIMPLIFY = F)
+
+W <- mapply(function(x,y) x$W[y,], x=ruv3ps,y=orig.s, SIMPLIFY=F)
+
+Histsps <- mapply(histT,y=ys.ct,w=W,topDPC=topDPC,map(ys.ct,'samples'),SIMPLIFY = F)
+ 
+  
+```
+
+
+### Normalisation {.tabset}
+
+```{r ruvpbps plots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list(PCAplotspsfull[[i]], Silplotsps[[i]], PCAplotsps[[i]], RLEplotsps[[i]])
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2, common.legend = T, legend="bottom"))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### DEA {.tabset}
+
+```{r DEpbpsplots , results='asis'}
+
+for (i in 1:length(celltypes)){
+  
+  cat(knitr::knit_expand(text=paste0('\n#### ',celltypes[i], ' {-}\n')))
+  
+  plots <- list( Histsps[[i]]$hist,Histsps[[i]]$volcano,Histsps[[i]]$volcano_int#,LFCplots[[i]]
+                 )
+ 
+  print(ggpubr::ggarrange(plotlist=plots,nrow=2,ncol=2))
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+```{r export pbps T4, include=FALSE}
+
+PCAplot(pca= pcas[[3]], y=ys.ct[[3]], avg_sw2 = avgs_sw2[[3]] ,avg_swp = avgs_swp[[3]] ) 
+ggsave(paste0(path,'/paper/graphs/studycase/T4PCApbpsSCm.png'),height = 5, width = 7)
+
+RLEplotsps[[3]]
+ggsave(paste0(path,'/paper/graphs/studycase/T4RLEpbpsSCm.png'),height = 5, width = 7)
+
+Histsps[[3]]$hist
+ggsave(paste0(path,'/paper/graphs/studycase/T4histpbpsSCm.png'),height = 5, width = 7)
+
+
+for (i in 1:8){
+  Silplotsps[[i]]
+ggsave(paste0(path,'/paper/graphs/studycase/',celltypes[i],'silpbpsSCm.png'),height = 5, width = 7)
+  
+}
+
+```
+
+
+## Common DEG PBPS{.tabset}
+
+<!-- ### Code -->
+```{r rank comp pbps}
+
+DEGs <- function(x){
+  
+  rownames(x$pvals)[x$pvals$adj.P.Val< 0.01]
+}
+    
+
+DegsUQ <- lapply(Hists,DEGs)
+DegsB <- lapply(HistsB ,DEGs)
+DegsPS <- lapply(Histsps,DEGs)
+
+
+Degstoplot <- mapply(function(v,w,x,
+                              z) list(ISG=v,UQ=w,Batch=x, 
+                                                RUVIIIpbps=z),v=DEGsISG, w=DegsUQ,x=DegsB,z=DegsPS, SIMPLIFY = F)
+
+upsetPlots <- lapply(Degstoplot[1:7], function(x) upset(fromList(x),order.by = "freq") )
+
+degs_methods <- list_transpose(Degstoplot)
+
+ISGdetect <- sapply(degs_methods,function (x) rowSums(sapply(x, function (y) ISGsignature %in% y)))
+
+rownames(ISGdetect)<- ISGsignature
+ISGdetect <- as.data.frame(ISGdetect)
+ISGdetect$rank <- 1:100
+
+ISGmissPBPS <- dplyr::select(ISGdetect,-1)%>%filter(UQ==0|Batch==0|RUVIIIpbps==0)
+
+```
+
+
+```{r upsetplots pbps , results='asis'}
+
+for (i in 1:(length(celltypes)-1)){
+  
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+ 
+  print(upsetPlots[[i]] )
+
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+
+}
+```
+
+### Signauture genes not detected
+
+```{r ISGmissRUVpbps , results='asis'}
+
+print(knitr::kable(ISGmissPBPS))
+
+```
+
+
+
+## Gene enrichment {.tabset}
+
+
+```{r gsea pb}
+
+all_gene_sets <- msigdbr(species = "Homo sapiens",category = "C5", subcategory='BP')
+genes_padj <- function (pvaltab, q=0.01){
+  genes_padj <- rownames(pvaltab[pvaltab$adj.P.Val<0.01,])
+  return(genes_padj)
+  
+}
+
+gseasUQ <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=Hists, y=ys.ct, SIMPLIFY=F)
+
+gseasBatch <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=HistsB, y=ys.ct, SIMPLIFY=F)
+
+gseasRUVIIIpbps <- mapply(function(x,y) gsea(genes_padj(x[["pvals"]]),background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000),x=Histsps, y=ys.ct, SIMPLIFY=F)
+
+ISGgseas <-  mapply(function(y) gsea(ISGsignature,background = row.names(y),geneSets=all_gene_sets,  minSize=5, name=NULL,n=1000), y=ys.ct, SIMPLIFY=F)
+
+
+```
+
+```{r comp pb}
+
+gseaGenes <- function (gseas){
+  gseas[gseas$padj<0.1,]$geneSet
+}
+
+
+estoplot <- mapply(function(v,w,x,y) list(ISG=gseaGenes(v),UQ=gseaGenes(w),Batch=gseaGenes(x),RUVIIIpbps=gseaGenes(y)),v=ISGgseas, w=gseasUQ ,x=gseasBatch,y=gseasRUVIIIpbps, SIMPLIFY = F)
+
+upsetPlotses <- lapply(estoplot[1:7], function(x) upset(fromList(x),order.by = "freq") )
+
+gseas_methods <- list_transpose(estoplot)
+ISGdetect <- sapply(gseas_methods,function (x) rowSums(sapply(x, function (y) gseaGenes(ISGgseas[[1]]) %in% y)))
+
+rownames(ISGdetect)<- gseaGenes(ISGgseas[[1]])
+ISGdetect <- as.data.frame(ISGdetect)
+ISGdetect$rank <- 1:length(gseaGenes(ISGgseas[[1]]))
+ISGmiss <- dplyr::select(ISGdetect,-ISG)%>%filter(UQ==0|Batch==0|RUVIIIpbps==0)
+
+
+UQmiss1 <- sapply(gseas_methods,function(w) mapply(function(x,y) x[!x %in%  y],x=gseas_methods[['UQ']], y =w ),simplify = F)
+
+gseasAllUQ <- unique(unlist(gseas_methods[['UQ']]))
+
+gseasUQdetect <- sapply(gseas_methods,function (x) rowSums(sapply(x, function (y) gseasAllUQ  %in% y)))
+
+rownames(gseasUQdetect)<-gseasAllUQ 
+gseasUQdetect <- as.data.frame(gseasUQdetect)
+gseasUQmiss <- dplyr::select(gseasUQdetect,-ISG)%>%filter(Batch==0,RUVIIIpbps==0)
+
+UQexport <- all_gene_sets[all_gene_sets$gs_name%in% rownames(gseasUQmiss),'gs_exact_source']%>%unique()
+
+#write.table(UQexport,'UQonlyGSEApbpsCS.txt',quote=F, row.names = F) 
+
+```
+
+```{r upset gseas pb, results='asis'}
+
+
+for (i in 1:(length(celltypes)-1)){
+
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {-}\n')))
+  
+  print(upsetPlotses[[i]])
+  
+
+
+}
+
+```
+
+```{r pbps gsea upset, include=FALSE}
+
+
+for(i in c(3,4,6,7)){
+ jpeg(file = paste0(path,'/paper/graphs/studycase/',celltypes[i],'GSEAupsetSCmPBPS.png'),height = 500, width = 700)
+print(upsetPlotses[[i]])
+
+dev.off() 
+}
+
+
+
+
+```
+
+
+## Different results in GSEA {.tabset}
+
+```{r ruvpbps diffs , results='asis'}
+gseas_methods <- list_transpose(estoplot)
+onlyBatch <- mapply(setdiff,x=gseas_methods$Batch,y= gseas_methods$RUVIIIpbps)
+onlypbps <- mapply(setdiff,y=gseas_methods$Batch,x= gseas_methods$RUVIIIpbps)
+
+diffs <- mapply( function (x,y) data.frame(GOset = c(x,y))%>% mutate(Batch= as.numeric(GOset %in% x) , PBPS= as.numeric(GOset %in% y)), x=onlyBatch,y=onlypbps, SIMPLIFY = FALSE)
+
+
+for (i in 1:(length(celltypes)-1)){
+
+  cat(knitr::knit_expand(text=paste0('\n### ',celltypes[i], ' {.tabset}\n')))
+  print(knitr::kable(diffs[[i]]))
+  cat(knitr::knit_expand(text=paste0("\n\n")))
+  
+}
+
+```
+
