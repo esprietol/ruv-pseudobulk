@@ -10,7 +10,7 @@ The datasets used in the analyses are available [here](https://doi.org/10.5281/z
 - **DEG_PC_control**: Code to identify differentially expressed genes between processing cohorts.  
 - **FDRsim_T2noint**: Simulations for differential expression analysis (DEA) in the control subset; treatments are balanced with respect to processing cohort, and no interaction term is considered.  
 - **FDRsim_T2nointC**: Simulations for DEA in the control subset; treatment is confounded with processing cohort, no interaction term is considered.
-- - **FDRsim_intC**: Simulations for DEA in the control subset; treatment is confounded with processing cohort, and an interaction term is considered.  
+- **FDRsim_intC**: Simulations for DEA in the control subset; treatment is confounded with processing cohort, and an interaction term is considered.  
 - **FDRsim_PBPS**: Simulations for DEA in the control subset using PBPS; treatment is confounded with processing cohort, no interaction term is considered.  
 - **FDRsim_PBPSint**: Simulations for DEA in the control subset using PBPS; treatment is confounded with processing cohort, and an interaction term is included.  
 - **FDRsim_misspecified_ncg**: Simulations for DEA where the treatment is confounded with processing cohort and negative control genes are misspecified.  
